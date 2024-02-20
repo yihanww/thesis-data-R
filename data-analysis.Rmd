@@ -1,0 +1,624 @@
+---
+title: "Data Analysis"
+author: "Yihan Wang"
+date: "2024-01/02"  
+output: 
+  bookdown::html_document2:
+    toc: true
+
+---
+# Import Packages
+```{r setup, message=FALSE, warning=FALSE}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(jsonlite)
+library(knitr)
+library(kableExtra)
+library(papaja)
+library(rstatix)
+library(psych)
+knitr::opts_chunk$set(echo = TRUE)
+#library(irr)
+#library(magrittr)
+#library(ggpubr)
+```
+
+# Data Read In
+```{r read-in data, message=FALSE, warning=FALSE}
+# experiment dataset downloaded via Railway code, including open-ended questions' answers
+fulldata <- read.csv("data/fulldata.csv") 
+```
+
+# Data Cleaning Step 1 - Access
+## Responses Scores from Each Participants
+```{r responses data, message=FALSE, warning=FALSE}
+# response scores for each stimulus
+response_data <- fulldata %>% 
+  select(PROLIFIC_PID, stimulus, response) %>% 
+  na.omit()
+
+response_data$stimulus_num <- as.numeric(sub(".*/(\\d+)\\.jpeg", "\\1", response_data$stimulus))
+
+# arrange the format
+responses <- response_data %>% 
+  arrange(stimulus_num) %>%
+  pivot_wider(
+    id_cols = PROLIFIC_PID,        
+    names_from = stimulus_num,       
+    values_from = response)
+```
+
+Some rows need to be dropped.
+Drop manully: the 1st row recorded the answer by myself to test, and other rows of unreliable answers. Some participants rate all pictures with the same number for quicker completion or feel unethical to judge people based on their looks. 
+
+```{r responses drop, message=FALSE, warning=FALSE}
+# drop certain rows 
+responses <- responses[-c(1, 12, 15, 94, 98, 106), ]
+```
+
+## Answers of the Open-ended Questions from Each Participants
+```{r answers data, message=FALSE, warning=FALSE}
+# access answers of open-ended questions
+openq_data <- fulldata %>% 
+  select(PROLIFIC_PID, form_data) %>% 
+  na.omit() %>% 
+  filter(str_detect(form_data, "whatTested")) 
+
+# format all answers into columns 
+openq_answer <- list()
+for (i in seq_along(openq_data$form_data)) {
+  openq_answer[[i]] <- fromJSON(openq_data$form_data[i], 
+                                simplifyDataFrame = FALSE)
+}
+openq_answer_df <- bind_rows(openq_answer) 
+```
+
+The openq_answer_df has 161 rows, which is inconsistent with the participants numbers.
+This is because the fromJSON function identified multiple race information into separate rows, and result in multiple rows for one participants. 
+To solve that, I output the df into a csv file and reorganize manually. I also add the Prolific id back to the df. 
+
+```{r organize answers data, message=FALSE, warning=FALSE}
+write.csv(openq_answer_df, "data/openq_answer_df.csv") 
+# The new edited file is called "openq_full.csv"
+openq_full <- read.csv("data/openq_full.csv") # before drop unreliable 
+```
+
+My dataset for now has been tidied for further analysis. In the "responses_full.csv", each column represents one stimulus, each row stands for each participants, and each cell is a single measurement of the rated competence score. For further analysis, I will need to do the test-retest reliability check and assign conditions to facial stimuli, which will require me to build dataset in different format based on "responses_full.csv".
+In "openq_full.csv", the participants' sex and race are my main focus because this might influence their judgments on my facial stimuli, which categorized by gender and race.
+
+# Data Cleaning Step 2 - Check
+## With-in Raters Reliability (Test-retest) Check 
+  Each participant’s within-rater reliability was defined as the Pearson correlation between ratings on the first and second presentation of the last 24 repeated images. A positive correlation indicates an overall consistent response to the stimuli from that rater. Unreliable raters were defined as those with within-rater reliability less than or equal to 0. 
+
+Pics arranged in 9 blocks to counter balance. Block1:-2,+2,0. Block2:0,-2,+2. Block3:+2,0,-2
+
+Stimuli numbers >126 = repeat pics(format = stimulus_stinum-repeated_stinum)
+127-8. 128-63. 129-33. 130-56. 131-44. 132-25. 133-93. 134-87. 135-96.
+136-77. 137-72. 138-89. 139-34. 140-46. 141-80. 142-50. 143-11. 144-15.
+145-66. 146-35. 147-60. 148-5. 149-24. 150-57.
+
+To Calculate the Pearson correlation for each participants, there will be a dataframe for each participants. 24 rows (24 repeated pics) * 2 columns (first presentation, second presentation), and rating scores from the participants in each cell. 
+
+```{r check-drop, message=FALSE, warning=FALSE}
+# assign stimuli numbers
+first_presentation_stinum <- c(8, 63, 33, 56, 44, 25, 93, 87, 96, 77, 72, 89, 34, 46, 80, 50, 11, 15, 66, 35, 60, 5, 24, 57)
+second_presentation_stinum <- c(127:150) 
+# increment each item by 1, because of the PROLIFIC_PID column
+first_presentation_stinum <- first_presentation_stinum + 1
+second_presentation_stinum <- second_presentation_stinum + 1
+
+# set the function to calculate the Pearson correlation 
+calculate_correlation <- function(responses) {
+  # create two small dataframes then combine them to calculate the Pearson correlation
+  # Args: 
+  #   responses : the full dataset that stores all responses from the participants
+  # Returns:
+  #   the specific Pearson correlation score for each participants
+  first_all <- responses %>%
+    select(first_presentation_stinum) %>%
+    pivot_longer(cols = everything(),
+                  names_to = "first_stinum",
+                  values_to = "first_rating")
+  second_all <- responses %>%
+    select(second_presentation_stinum) %>%
+    pivot_longer(cols = everything(),
+                  names_to = "second_stinum",
+                  values_to = "second_rating")
+  test_all <- cbind(first_all,second_all)
+  correlation <- cor(test_all$first_rating, test_all$second_rating)
+  return(correlation)
+}
+
+# call the function in each row using for loop 
+correlation_result <- list()
+for (i in 1:nrow(responses)) {
+  correlation_result[[i]] <- calculate_correlation(responses[i, ])
+}
+
+
+# determine unreliable
+unreliable <- which(sapply(correlation_result, function(x) x <= 0))
+
+
+# Remove unreliable participants & 
+# Drop the Scores for the last 24 pictures, because they are only for reliability check purposes. 
+responses <- responses[-c(unreliable), ] %>% 
+            select(-(128:151))
+
+#write.csv(responses, "data/responses.csv") 
+```
+
+# Data Cleaning Step 3 - Organize
+Then, assign stimulus conditions. 
+```{r assign conditions, message=FALSE, warning=FALSE}
+# gender 
+#male <- list(1,2,4,6,10,12,14,15,16,20,22,23,27,28,29,30,32,36,37,39,41,44,45,50,51,52,54,56,58,59,60,63,65,67,68,72,73,74,77,80,81,84,85,86,87,90,93,96,97,101,103,105,106,107,110,112,115,118,120,121,123,124,126)
+#female <- list(3,5,7,8,9,11,13,17,18,19,21,24,25,26,31,33,34,35,38,40,42,43,46,47,48,49,53,55,57,61,62,64,66,69,70,71,75,76,78,79,82,83,88,89,91,92,94,95,98,99,100,102,104,108,109,111,113,114,116,117,119,122,125,127,129,132,138,139,140,143,145,146,148,149,150)
+male_stimuli <- c(1,2,4,6,10,12,14,15,16,20,22,23,27,28,29,30,32,36,37,39,41,44,45,50,51,52,54,56,58,59,60,63,65,67,68,72,73,74,77,80,81,84,85,86,87,90,93,96,97,101,103,105,106,107,110,112,115,118,120,121,123,124,126)
+female_stimuli <- c(3,5,7,8,9,11,13,17,18,19,21,24,25,26,31,33,34,35,38,40,42,43,46,47,48,49,53,55,57,61,62,64,66,69,70,71,75,76,78,79,82,83,88,89,91,92,94,95,98,99,100,102,104,108,109,111,113,114,116,117,119,122,125)
+
+# weight
+minus2 <- c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,57,58,59,60,61,62,63,64,65,66,67,68,69,70,113,114,115,116,117,118,119,120,121,122,123,124,125,126)
+zero <- c(29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,99,100,101,102,103,104,105,106,107,108,109,110,111,112)
+plus2 <- c(15,16,17,18,19,20,21,22,23,24,25,26,27,28,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98)
+
+# race
+asian <- c(7,8,12,13,16,19,21,23,27,28,30,32,38,42,43,48,51,54,56,57,60,63,66,68,71,75,78,84,87,89,97,98,99,104,106,111,112,113,115,119,121,124)
+white <- c(1,4,5,10,11,15,18,20,22,25,31,34,37,40,45,50,52,53,58,61,69,73,76,77,79,80,90,91,92,95,100,103,105,107,108,109,117,118,122,123,125,126)
+black <- c(2,3,6,9,14,17,24,26,29,33,35,36,39,41,44,46,47,49,55,59,62,64,65,67,70,72,74,81,82,83,85,86,88,93,94,96,101,102,110,114,116,120)
+
+# responses mean & assign conditions
+mean_con <- responses %>% summarize(across(everything(), mean, na.rm = TRUE))%>%
+  subset(select = -1) %>%
+  pivot_longer(cols = everything(),                                                              names_to = "stimulus_num",                        
+               values_to = "mean_score") %>% # get mean score of each stimulus 
+  mutate(sti_gender = if_else(stimulus_num %in% female_stimuli, "female", "male")) %>%
+  mutate(sti_weight = case_when(
+    stimulus_num %in% minus2 ~ -2,
+    stimulus_num %in% zero ~ 0,
+    stimulus_num %in% plus2 ~ +2)) %>%
+  mutate(sti_race = case_when(
+    stimulus_num %in% asian ~ "Asian",
+    stimulus_num %in% white ~ "White",
+    stimulus_num %in% black ~ "Black")) 
+#write.csv(mean_con, "data/responses_meancon.csv") 
+```
+# Fitting Model - ANOVA
+Since the stimuli are repeated in three levels of weight conditions (minus2, zero, plus2) and grouped in gender and race. Since the weight conditions can be viewed as a repeated condition, I will use repeated measurements ANOVA for this within subject design. ANOVA is more sensitive to the difference within each condition than between group variance. 
+The dependent variable will be the evaluations of competence, which will be quantified based on the ratings given by the participants. The independent variables will be weight (-2, 0, +2 SD), gender (male, female), and race (White, Black, Asian). We predict an interaction (significance) between gender and weight conditions. There might be racial differences in how weight influences perceived competence. See Table\@ref(tab:genderANOVAkable) for a summary of the analysis. 
+
+```{r prep ANOVA data, message=FALSE, warning=FALSE}
+anova_data <- responses %>%
+  pivot_longer(
+    cols = 2:127, 
+    names_to = "sti_num", 
+    values_to = "responses"
+  ) %>%
+  mutate(sti_gender = if_else(sti_num %in% female_stimuli, "female", "male"),
+         sti_weight = case_when(
+           sti_num %in% minus2 ~ "minus2",
+           sti_num %in% zero ~ "zero",
+           sti_num %in% plus2 ~ "plus2"),
+         sti_race = case_when(
+           sti_num %in% asian ~ "Asian",
+           sti_num %in% white ~ "White",
+           sti_num %in% black ~ "Black")) 
+#write.csv(anova_data, "data/anova_data.csv") 
+```
+
+```{r genderANOVAdata, message=FALSE, warning=FALSE}
+anova_data_group <- anova_data %>%
+  group_by(PROLIFIC_PID, sti_gender, sti_weight) %>%
+  summarise(mean_response = mean(responses, na.rm = TRUE))
+anova_data_group <- data.frame(anova_data_group)
+#write.csv(anova_data_group, "data/anova_data_group.csv")
+```
+
+```{r gender-ANOVA, message=FALSE, warning=FALSE}
+gender_anova <- anova_test(data=anova_data_group,
+                      dv = "mean_response",
+                      wid= "PROLIFIC_PID",
+                      within=c("sti_gender", "sti_weight"),
+                      effect.size="pes",
+                      detailed=TRUE)
+print(get_anova_table(gender_anova), options(scipen = 999))
+
+```
+
+
+```{r genderANOVAkable, message=FALSE, warning=FALSE, echo = TRUE}
+caption_html <- "<span style='font-family: Times; font-size: 16px; font-style: italic;'>General ANOVA</span>"
+
+gender_anova_kable <- kable(gender_anova$ANOVA, 
+                            format = "html", 
+                            caption = caption_html) %>% 
+                            #align = c("l","r","r","r","r")) %>%
+  add_header_above(c(" " = 1, 
+                     "Degrees of Freedom" = 2, 
+                     "Sum of Squares" = 2, 
+                     "F and p-Values" = 3, 
+                     "Effect Size" = 1)) %>%
+  # Alternating row colors for readability
+  row_spec(0:4, background = rep(c("#f7f7f7", "#ffffff"), length.out = 5)) %>%
+  # Highlighting significant p-values in red and bold
+  row_spec(which(anova_data$`p<.05` == "*"), color = "red", bold = TRUE) %>%
+  # Aligning the table to the left, not full width, and setting font size
+  kable_styling(position = "center", full_width = F, font_size = 12) %>%
+  footnote(general = "*p < 0.05, **p < 0.01, ***p < 0.001")
+
+gender_anova_kable
+```
+The results shows that the statistical significance happens to independt variables sti_gender and sti_weight (p = `r round(gender_anova[["ANOVA"]][["p"]][2], 3)`, p =  `r round(gender_anova[["ANOVA"]][["p"]][3], 3)`), meaning that there is a difference of competence rating when stimulus gender and weight changes. However, we fail to reject the null hypothesis because the p-value for sti_gender*sti_weight (p = `r round(gender_anova[["ANOVA"]][["p"]][4], 3)`) does not significant, meaning that the interaction between these two factors do not make a difference in competence rating. 
+
+```{r gender ANOVA apa , message=FALSE, warning=FALSE}
+#gender_anova_apa <- apa_table(gender_anova$ANOVA, caption = "General ANOVA",note = "Note: * indicates p < .05. SSn = Sum of Squares numerator; SSd = Sum of Squares denominator; DFn = Degrees of Freedom numerator; DFd = Degrees of Freedom denominator.",
+          #escape = FALSE,
+          #align = 'lcccccc')
+#print(gender_anova_apa)
+```
+
+```{r gender race ANOVA data, message=FALSE, warning=FALSE}
+anova_data_race <- anova_data %>%
+  group_by(PROLIFIC_PID, sti_gender, sti_weight,sti_race) %>%
+  summarise(mean_response = mean(responses, na.rm = TRUE))
+anova_data_race <- data.frame(anova_data_race)
+```
+
+```{r gender race ANOVA , message=FALSE, warning=FALSE}
+gender_race_anova <- anova_test(data=anova_data_race,
+                      dv = "mean_response",
+                      wid= "PROLIFIC_PID",
+                      within=c("sti_gender", "sti_weight","sti_race"),
+                      effect.size="pes",
+                      detailed=TRUE)
+print(get_anova_table(gender_race_anova))
+```
+
+```{r gender race ANOVA kable , message=FALSE, warning=FALSE, echo = TRUE}
+caption_html_race <- "<span style='font-family: Times; font-size: 16px; font-style: italic;'>General ANOVA with race</span>"
+
+gender_race_anova_kable <- kable(gender_race_anova$ANOVA, format = "html", caption = caption_html_race) %>%
+ add_header_above(c(" " = 1, "Degrees of Freedom" = 2, "Sum of Squares" = 2, "F and p-Values" = 3, "Effect Size" = 1)) %>%
+  # Alternating row colors for readability
+  row_spec(0:4, background = rep(c("#f7f7f7", "#ffffff"), length.out = 5)) %>%
+  # Highlighting significant p-values in red and bold
+  row_spec(which(anova_data$`p<.05` == "*"), color = "red", bold = TRUE) %>%
+  # Aligning the table to the left, not full width, and setting font size
+  kable_styling(position = "left", full_width = F, font_size = 12)
+
+gender_race_anova_kable
+```
+
+### prep SPSS
+```{r prep SPSS data, message=FALSE, warning=FALSE}
+# re-arrange the responses data set
+f_minus2 <- intersect(female_stimuli,minus2)
+m_minus2 <- intersect(male_stimuli,minus2)
+f_zero <- intersect(female_stimuli,zero)
+m_zero <- intersect(male_stimuli,zero)
+f_plus2 <- intersect(female_stimuli,plus2)
+m_plus2 <- intersect(male_stimuli,plus2)
+
+# assign mixed conditions
+responses_reg <- responses 
+responses_reg<-responses_reg[, -1]
+
+# Renaming the columns
+for (col in colnames(responses_reg)) {
+    if (as.numeric(col) %in% (f_minus2)) {
+        colnames(responses_reg)[colnames(responses_reg) == col] <- "f_minus2"
+    } else if (as.numeric(col) %in% (m_minus2)) {
+        colnames(responses_reg)[colnames(responses_reg) == col] <- "m_minus2"
+    } else if (as.numeric(col) %in% (f_zero)) {
+        colnames(responses_reg)[colnames(responses_reg) == col] <- "f_zero"
+    } else if (as.numeric(col) %in% (m_zero)) {
+        colnames(responses_reg)[colnames(responses_reg) == col] <- "m_zero"
+    } else if (as.numeric(col) %in% (f_plus2)) {
+        colnames(responses_reg)[colnames(responses_reg) == col] <- "f_plus2"
+    } else if (as.numeric(col) %in% (m_plus2)) {
+        colnames(responses_reg)[colnames(responses_reg) == col] <- "m_plus2"
+    }
+}
+#write.csv(responses_reg, "data/responses_mixedcon_gender&weight.csv") 
+```
+# Plot
+The Figure\@ref(fig:mean-plot) shows the mean score of competence of each stimuli by stimuli weight and gender.
+```{r mean data, message=FALSE, warning=FALSE}
+ summary_df <- anova_data %>%
+  group_by(sti_gender,sti_weight) %>%
+  summarize(
+    mean = mean(responses, na.rm = TRUE),
+    se = sd(responses, na.rm = TRUE) / sqrt(n()))
+```
+
+```{r mean-plot, fig.cap="Average Mean Score of Stimulus by Weight and Gender", message=FALSE, warning=FALSE, echo = TRUE}
+summary_df <- summary_df %>%
+  mutate(sti_weight = factor(sti_weight, levels = c("minus2", "zero", "plus2")))  
+ggplot(summary_df, aes(x = sti_weight, 
+                       y = mean, 
+                       color = sti_gender, 
+                       group = sti_gender)) +
+  geom_line() +  
+  geom_point()+
+  geom_errorbar(aes(ymin = mean - se, 
+                    ymax = mean + se), 
+                width = 0.2) +
+  scale_y_continuous(limits = c(50, 70)) +
+  labs(title = "Average Mean Score of Stimulus by Weight & Gender",
+       x = "Stimulus Weight by SD",
+       y = "Average Mean Score of Competence") +
+  scale_color_manual(values = c("male" = "blue", "female" = "red"))  +  
+  theme_minimal() +
+  geom_text(aes(label = sprintf("%.2f", mean)),  
+            vjust = -1, 
+            size = 3)
+```
+
+The Figure\@ref(fig:mean-with-race-plot) shows the mean score of competence of each stimuli by stimuli weight, gender and race.   
+
+```{r mean with race, message=FALSE, warning=FALSE}
+summary_df_race <- anova_data %>%
+  group_by(sti_gender,sti_weight,sti_race) %>%
+  summarize(
+    mean = mean(responses, na.rm = TRUE),
+    se = sd(responses, na.rm = TRUE) / sqrt(n()))
+```
+
+```{r mean-with-race-plot, fig.cap="Average Mean Score of Stimulus by Weight, Gender and Race", message=FALSE, warning=FALSE, echo = TRUE}
+summary_df_race <- summary_df_race %>%
+  mutate(sti_weight = factor(sti_weight, levels = c("minus2", "zero", "plus2"))) 
+ggplot(summary_df_race, aes(x = sti_weight, 
+                              y = mean, 
+                              color = sti_gender, 
+                              group = sti_gender)) +
+  facet_wrap(~ sti_race, scales = "fixed") + 
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean - se, 
+                    ymax = mean + se), 
+                width = 0.2)+
+  scale_y_continuous(limits = c(50, 70)) +
+  labs(title = "Average Mean Score of Stimulus by Weight & Gender & Race",
+       x = "Stimulus Weight by SD",
+       y = "Average Mean Score of Competence") +
+  scale_color_manual(values = c("male" = "blue", "female" = "red"))+ 
+  theme_minimal()+
+  geom_text(aes(label = sprintf("%.2f", mean)),  
+            vjust = -1.2, 
+            hjust = 0.5, 
+            check_overlap = TRUE, 
+            size = 3)
+```
+# Pariticipants
+## Filter valid participants and their answers
+```{r participants, message=FALSE, warning=FALSE}
+valid_participants <- responses$PROLIFIC_PID
+responses_p <- openq_full %>% 
+  filter(Participant.id %in% valid_participants) %>% 
+  select(Participant.id, sex, race) %>%
+  left_join(responses, by = c("Participant.id" = "PROLIFIC_PID"))
+```
+Participants participated in an online study for monetary compensation via Prolific. (n = `r nrow(responses_p)`, `r nrow(filter(responses_p, sex == "Female"))` female, `r nrow(filter(responses_p, sex == "Male"))` male)
+
+The Figure\@ref(fig:viz-participants-demo-gender) shows participants' demographic information by gender.
+```{r viz-participants-demo-gender, fig.cap="Participants Demographics-Gender", message=FALSE, warning=FALSE, echo = TRUE}
+# Plot the bar chart
+ggplot(responses_p, aes(x = sex)) +
+  geom_bar(aes(fill = sex)) +
+  geom_text(stat = 'count', aes(label = ..count.., 
+                                y = ..count..), 
+            vjust = -0.3) +
+  scale_fill_manual(values = c("Female" = "blue", 
+                               "Male" = "red", 
+                               "Prefer not to say" = "black")) +
+  labs(fill = "Sex") +   
+  labs(title = "Participants Demographics-Gender",
+       x = "Sex",
+       y = "Number of Participants")
+```
+
+The Figure\@ref(fig:viz-participants-demo-gender-race) shows participants' demographic information by gender and race.
+```{r viz-participants-demo-gender-race, fig.cap="Participants Demographics-Gender and Race", message=FALSE, warning=FALSE, echo = TRUE}
+ggplot(responses_p, aes(x = sex, fill = race)) +
+  geom_bar() +
+  geom_text(stat = 'count', aes(label = ..count.., 
+                                y = ..count..), 
+            position = position_stack(vjust = 0.5)) +
+  scale_fill_manual(values = c("White" = "blue", 
+                               "East Asian" = "yellow",
+                               "Black/African American" = "red")) +
+  labs(title = "Participants Demographics-Gender and Race",
+       x = "Sex",
+       y = "Number of Participants",
+       fill = "Race")
+```
+
+## Run ANOVA on female participants
+```{r female ANOVA data, message=FALSE, warning=FALSE}
+anova_subset_female <- responses_p %>% 
+  filter(sex == "Female") %>% 
+  select(-sex, -race) %>% 
+  pivot_longer(
+    cols = 2:127, 
+    names_to = "sti_num", 
+    values_to = "responses"
+  ) %>%
+  mutate(sti_gender = if_else(sti_num %in% female_stimuli, "female", "male"),
+         sti_weight = case_when(
+           sti_num %in% minus2 ~ "minus2",
+           sti_num %in% zero ~ "zero",
+           sti_num %in% plus2 ~ "plus2"),
+         sti_race = case_when(
+           sti_num %in% asian ~ "Asian",
+           sti_num %in% white ~ "White",
+           sti_num %in% black ~ "Black")) 
+
+anova_female_data <- anova_subset_female %>%
+  group_by(Participant.id, sti_gender, sti_weight) %>%
+  summarise(mean_response = mean(responses, na.rm = TRUE))
+anova_female_data <- data.frame(anova_female_data)
+
+```
+
+```{r female ANOVA , message=FALSE, warning=FALSE}
+female_anova <- anova_test(data=anova_female_data,
+                      dv = "mean_response",
+                      wid= "Participant.id",
+                      within=c("sti_gender", "sti_weight"),
+                      effect.size="pes",
+                      detailed=TRUE)
+print(get_anova_table(female_anova), options(scipen=9999))
+```
+
+```{r female ANOVA kable , message=FALSE, warning=FALSE, echo = TRUE}
+caption_html_female <- "<span style='font-family: Times; font-size: 16px; font-style: italic;'>Female participants ANOVA</span>"
+
+female_anova_kable <- kable(female_anova$ANOVA, format = "html", caption = caption_html_female) %>%
+ add_header_above(c(" " = 1, "Degrees of Freedom" = 2, "Sum of Squares" = 2, "F and p-Values" = 3, "Effect Size" = 1)) %>%
+  # Alternating row colors for readability
+  row_spec(0:4, background = rep(c("#f7f7f7", "#ffffff"), length.out = 5)) %>%
+  # Highlighting significant p-values in red and bold
+  row_spec(which(anova_data$`p<.05` == "*"), color = "red", bold = TRUE) %>%
+  # Aligning the table to the left, not full width, and setting font size
+  kable_styling(position = "left", full_width = F, font_size = 12)
+
+female_anova_kable
+```
+
+Plot
+```{r female participants mean plot, message=FALSE, warning=FALSE}
+summary_df2 <- anova_female_data %>%
+  group_by(sti_gender,sti_weight) %>%
+  summarize(
+    mean = mean(mean_response, na.rm = TRUE),
+    se = sd(mean_response, na.rm = TRUE) / sqrt(n()))
+
+summary_df2 <- summary_df2 %>%
+  mutate(sti_weight = factor(sti_weight, levels = c("minus2", "zero", "plus2")))
+
+ggplot(summary_df2, aes(x = sti_weight, 
+                       y = mean, 
+                       color = sti_gender, 
+                       group = sti_gender)) +
+  geom_line() +  
+  geom_point()+
+  geom_errorbar(aes(ymin = mean - se, 
+                    ymax = mean + se), 
+                width = 0.2) +
+  scale_y_continuous(limits = c(50, 70)) +
+  labs(title = "Female PArticipants Average Mean Score of Stimulus by Weight & Gender",
+       x = "Stimulus Weight by SD",
+       y = "Average Mean Score of Competence") +
+  scale_color_manual(values = c("male" = "blue", "female" = "red"))  +  
+  theme_minimal() +
+  geom_text(aes(label = sprintf("%.2f", mean)),  
+            vjust = -1, 
+            size = 3)
+```
+## Run ANOVA on male participants
+```{r male ANOVA data, message=FALSE, warning=FALSE}
+anova_subset_male <- responses_p %>% 
+  filter(sex == "Male") %>% 
+  select(-sex, -race) %>% 
+  pivot_longer(
+    cols = 2:127, 
+    names_to = "sti_num", 
+    values_to = "responses"
+  ) %>%
+  mutate(sti_gender = if_else(sti_num %in% female_stimuli, "female", "male"),
+         sti_weight = case_when(
+           sti_num %in% minus2 ~ "minus2",
+           sti_num %in% zero ~ "zero",
+           sti_num %in% plus2 ~ "plus2"),
+         sti_race = case_when(
+           sti_num %in% asian ~ "Asian",
+           sti_num %in% white ~ "White",
+           sti_num %in% black ~ "Black")) 
+
+anova_male_data <- anova_subset_male %>%
+  group_by(Participant.id, sti_gender, sti_weight) %>%
+  summarise(mean_response = mean(responses, na.rm = TRUE))
+anova_male_data <- data.frame(anova_male_data)
+```
+
+```{r male ANOVA , message=FALSE, warning=FALSE}
+male_anova <- anova_test(data=anova_male_data,
+                      dv = "mean_response",
+                      wid= "Participant.id",
+                      within=c("sti_gender", "sti_weight"),
+                      effect.size="pes",
+                      detailed=TRUE)
+print(get_anova_table(male_anova), options(scipen=9999))
+```
+
+```{r male ANOVA kable , message=FALSE, warning=FALSE, echo = TRUE}
+caption_html_male <- "<span style='font-family: Times; font-size: 16px; font-style: italic;'>Male participants ANOVA</span>"
+
+male_anova_kable <- kable(male_anova$ANOVA, format = "html", caption = caption_html_male) %>%
+ add_header_above(c(" " = 1, "Degrees of Freedom" = 2, "Sum of Squares" = 2, "F and p-Values" = 3, "Effect Size" = 1)) %>%
+  # Alternating row colors for readability
+  row_spec(0:4, background = rep(c("#f7f7f7", "#ffffff"), length.out = 5)) %>%
+  # Highlighting significant p-values in red and bold
+  row_spec(which(anova_data$`p<.05` == "*"), color = "red", bold = TRUE) %>%
+  # Aligning the table to the left, not full width, and setting font size
+  kable_styling(position = "left", full_width = F, font_size = 12)
+
+male_anova_kable
+```
+Plot
+```{r male participants mean plot, message=FALSE, warning=FALSE}
+summary_df3 <- anova_male_data %>%
+  group_by(sti_gender,sti_weight) %>%
+  summarize(
+    mean = mean(mean_response, na.rm = TRUE),
+    se = sd(mean_response, na.rm = TRUE) / sqrt(n()))
+
+summary_df3 <- summary_df3 %>%
+  mutate(sti_weight = factor(sti_weight, levels = c("minus2", "zero", "plus2")))
+
+ggplot(summary_df2, aes(x = sti_weight, 
+                       y = mean, 
+                       color = sti_gender, 
+                       group = sti_gender)) +
+  geom_line() +  
+  geom_point()+
+  geom_errorbar(aes(ymin = mean - se, 
+                    ymax = mean + se), 
+                width = 0.2) +
+  scale_y_continuous(limits = c(50, 70)) +
+  labs(title = "Male Participants Average Mean Score of Stimulus by Weight & Gender",
+       x = "Stimulus Weight by SD",
+       y = "Average Mean Score of Competence") +
+  scale_color_manual(values = c("male" = "blue", "female" = "red"))  +  
+  theme_minimal() +
+  geom_text(aes(label = sprintf("%.2f", mean)),  
+            vjust = -1, 
+            size = 3)
+```
+
+# Post-Hoc Analysis Paired t-tests
+## TukeyHSD
+```{r TukeyHSD , message=FALSE, warning=FALSE}
+TukeyHSD(aov(responses~sti_weight, data = anova_data))
+```
+## Paired t-tests
+```{r paired t-tests, message=FALSE, warning=FALSE}
+paired_data <- anova_data %>% select(sti_weight,responses) %>%
+  group_by(sti_weight) %>%
+  mutate(id = row_number()) %>%
+  ungroup() %>%
+  pivot_wider(names_from = sti_weight, values_from = responses)
+
+# Perform paired t-tests for each comparison
+result_minus2_zero <- t.test(paired_data$minus2, paired_data$zero, paired = TRUE)
+result_zero_plus2 <- t.test(paired_data$zero, paired_data$plus2, paired = TRUE)
+result_minus2_plus2 <- t.test(paired_data$minus2, paired_data$plus2, paired = TRUE)
+
+# Print results
+p_adjusted1 <- p.adjust(result_minus2_zero$p.value, method = "bonferroni")
+p_adjusted2 <- p.adjust(result_zero_plus2$p.value, method = "bonferroni")
+p_adjusted3 <- p.adjust(result_minus2_plus2$p.value, method = "bonferroni")
+
+```
